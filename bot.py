@@ -60,15 +60,7 @@ auth_filter = _build_auth_filter()
 
 def resize_image_bytes(data: bytes, suffix: str, target_w: int, target_h: int) -> bytes:
     img = Image.open(BytesIO(data))
-
-    # Scale to cover the target (fill), then center-crop to exact dimensions
-    ratio = max(target_w / img.width, target_h / img.height)
-    scaled_w = max(int(img.width * ratio), target_w)
-    scaled_h = max(int(img.height * ratio), target_h)
-    img = img.resize((scaled_w, scaled_h), Image.LANCZOS)
-    left = (scaled_w - target_w) // 2
-    top = (scaled_h - target_h) // 2
-    img = img.crop((left, top, left + target_w, top + target_h))
+    img = img.resize((target_w, target_h), Image.LANCZOS)
 
     fmt = suffix.lstrip(".")
     if fmt in ("jpg", "jpeg"):
