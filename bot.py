@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 import zipfile
 import tempfile
@@ -211,9 +212,9 @@ async def _process_and_send(
                 None, shutil.copy2, str(local_path), str(zip_in)
             )
         else:
-            # PTB builds a broken double-slash URL in local mode, so download manually
-            clean = tg_file.file_path.lstrip("/")
-            url = f"http://127.0.0.1:8081/file/bot{BOT_TOKEN}/{clean}"
+            # PTB constructs the URL with a double-slash (base_file_url + absolute path).
+            # Fix: collapse any consecutive slashes that are not part of "://"
+            url = re.sub(r'(?<!:)/{2,}', '/', tg_file.file_path)
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream("GET", url) as resp:
                     resp.raise_for_status()
