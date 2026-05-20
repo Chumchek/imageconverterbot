@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import re
 import shutil
 import zipfile
 import tempfile
@@ -206,15 +205,20 @@ async def _process_and_send(
         tg_file = await context.bot.get_file(file_id)
         zip_in = tmp / "input.zip"
 
-        local_path = Path(tg_file.file_path)
-        if local_path.is_absolute() and local_path.is_file():
+        local_path = Path(tg_file.file_path) if not tg_file.file_path.startswith("http") else None
+        if local_path and local_path.is_absolute() and local_path.is_file():
             await asyncio.get_event_loop().run_in_executor(
                 None, shutil.copy2, str(local_path), str(zip_in)
             )
         else:
-            # PTB constructs the URL with a double-slash (base_file_url + absolute path).
-            # Fix: collapse any consecutive slashes that are not part of "://"
-            url = re.sub(r'(?<!:)/{2,}', '/', tg_file.file_path)
+            # The local server stores files at <data_dir>/<token>/<rel_path>.
+            # PTB wraps the absolute path into a URL, giving us:
+            # http://host/file/bot<TOKEN>//<data_dir>/<TOKEN>/<rel_path>
+            # We need: http://host/file/bot<TOKEN>/<rel_path>
+            # Split on /<TOKEN>/ — the part after the last occurrence is the rel_path.
+            parts = tg_file.file_path.split(f"/{BOT_TOKEN}/")
+            rel_path = parts[-1] if len(parts) > 1 else tg_file.file_path.lstrip("/")
+            url = f"http://127.0.0.1:8081/file/bot{BOT_TOKEN}/{rel_path}"
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream("GET", url) as resp:
                     resp.raise_for_status()
