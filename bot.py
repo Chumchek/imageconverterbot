@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import shutil
 import zipfile
 import tempfile
 from pathlib import Path
@@ -94,6 +93,30 @@ def resize_image_bytes(data: bytes, suffix: str, target_w: int, target_h: int) -
 
     img.save(buf, format=fmt, **save_kwargs)
     return buf.getvalue()
+
+
+CONTAINER_NAME = "telegram-bot-api"
+
+
+async def _container_file_ready(path: Path) -> bool:
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", CONTAINER_NAME, "test", "-f", str(path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+    return proc.returncode == 0
+
+
+async def _copy_from_container(container_path: Path, dest: Path) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "cp", f"{CONTAINER_NAME}:{container_path}", str(dest),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"docker cp failed: {stderr.decode().strip()}")
 
 
 async def unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -204,27 +227,35 @@ async def _process_and_send(
         tg_file = await context.bot.get_file(file_id)
         zip_in = tmp / "input.zip"
 
-        # In local server mode getFile triggers the download but returns before it
-        # completes. Extract the absolute path from PTB's URL and poll until ready.
+        # getFile triggers an async download inside the local server container.
+        # Extract the container-side absolute path from PTB's URL, then poll
+        # via docker exec until the file is ready, and copy it out with docker cp.
         fp = tg_file.file_path
         idx = fp.find("/var/lib/telegram-bot-api")
         if idx >= 0:
-            local_path = Path(fp[idx:])
+            container_path = Path(fp[idx:])
         else:
             parts = fp.split(f"/{BOT_TOKEN}/")
             rel = parts[-1] if len(parts) > 1 else fp.lstrip("/")
-            local_path = Path(f"/var/lib/telegram-bot-api/{BOT_TOKEN}/{rel}")
+            container_path = Path(f"/var/lib/telegram-bot-api/{BOT_TOKEN}/{rel}")
 
-        for _ in range(300):  # wait up to 5 minutes
-            if local_path.is_file():
+        logger.info("Waiting for container file: %s", container_path)
+        for _ in range(300):
+            if await _container_file_ready(container_path):
                 break
             await asyncio.sleep(1)
         else:
-            raise TimeoutError(f"File not ready after 5 minutes: {local_path}")
+            raise TimeoutError(f"File not ready after 5 minutes: {container_path}")
 
-        await asyncio.get_event_loop().run_in_executor(
-            None, shutil.copy2, str(local_path), str(zip_in)
+        await _copy_from_container(container_path, zip_in)
+
+        # Remove the file from inside the container to prevent disk accumulation
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", CONTAINER_NAME, "rm", "-f", str(container_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
+        await proc.wait()
 
         zip_out = tmp / "output.zip"
         processed = 0
