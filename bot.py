@@ -1,10 +1,13 @@
 import asyncio
 import logging
 import os
+import shutil
 import zipfile
 import tempfile
 from pathlib import Path
 from io import BytesIO
+
+import httpx
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -201,7 +204,22 @@ async def _process_and_send(
 
         tg_file = await context.bot.get_file(file_id)
         zip_in = tmp / "input.zip"
-        await tg_file.download_to_drive(zip_in)
+
+        local_path = Path(tg_file.file_path)
+        if local_path.is_absolute() and local_path.is_file():
+            await asyncio.get_event_loop().run_in_executor(
+                None, shutil.copy2, str(local_path), str(zip_in)
+            )
+        else:
+            # PTB builds a broken double-slash URL in local mode, so download manually
+            clean = tg_file.file_path.lstrip("/")
+            url = f"http://127.0.0.1:8081/file/bot{BOT_TOKEN}/{clean}"
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                async with client.stream("GET", url) as resp:
+                    resp.raise_for_status()
+                    with open(zip_in, "wb") as f:
+                        async for chunk in resp.aiter_bytes(8192):
+                            f.write(chunk)
 
         zip_out = tmp / "output.zip"
         processed = 0
