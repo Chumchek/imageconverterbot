@@ -4,21 +4,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
 User=deploy
-Group=deploy
 WorkingDirectory=/home/deploy/imageconverterbot
-EnvironmentFile=/home/deploy/imageconverterbot/.env
-ExecStart=/home/deploy/imageconverterbot/venv/bin/python bot.py
+ExecStart=/home/deploy/imageconverterbot/venv/bin/python3 bot.py
 Restart=always
 RestartSec=5
-
-# Don't let the bot eat all disk if something goes wrong with temp cleanup
-PrivateTmp=true
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=imageconverterbot
+EnvironmentFile=/home/deploy/imageconverterbot/.env
 
 [Install]
 WantedBy=multi-user.target
