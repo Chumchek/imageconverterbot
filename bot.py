@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 from io import BytesIO
 
-import httpx
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -205,26 +204,27 @@ async def _process_and_send(
         tg_file = await context.bot.get_file(file_id)
         zip_in = tmp / "input.zip"
 
-        local_path = Path(tg_file.file_path) if not tg_file.file_path.startswith("http") else None
-        if local_path and local_path.is_absolute() and local_path.is_file():
-            await asyncio.get_event_loop().run_in_executor(
-                None, shutil.copy2, str(local_path), str(zip_in)
-            )
+        # In local server mode getFile triggers the download but returns before it
+        # completes. Extract the absolute path from PTB's URL and poll until ready.
+        fp = tg_file.file_path
+        idx = fp.find("/var/lib/telegram-bot-api")
+        if idx >= 0:
+            local_path = Path(fp[idx:])
         else:
-            # The local server stores files at <data_dir>/<token>/<rel_path>.
-            # PTB wraps the absolute path into a URL, giving us:
-            # http://host/file/bot<TOKEN>//<data_dir>/<TOKEN>/<rel_path>
-            # We need: http://host/file/bot<TOKEN>/<rel_path>
-            # Split on /<TOKEN>/ — the part after the last occurrence is the rel_path.
-            parts = tg_file.file_path.split(f"/{BOT_TOKEN}/")
-            rel_path = parts[-1] if len(parts) > 1 else tg_file.file_path.lstrip("/")
-            url = f"http://127.0.0.1:8081/file/bot{BOT_TOKEN}/{rel_path}"
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                async with client.stream("GET", url) as resp:
-                    resp.raise_for_status()
-                    with open(zip_in, "wb") as f:
-                        async for chunk in resp.aiter_bytes(8192):
-                            f.write(chunk)
+            parts = fp.split(f"/{BOT_TOKEN}/")
+            rel = parts[-1] if len(parts) > 1 else fp.lstrip("/")
+            local_path = Path(f"/var/lib/telegram-bot-api/{BOT_TOKEN}/{rel}")
+
+        for _ in range(300):  # wait up to 5 minutes
+            if local_path.is_file():
+                break
+            await asyncio.sleep(1)
+        else:
+            raise TimeoutError(f"File not ready after 5 minutes: {local_path}")
+
+        await asyncio.get_event_loop().run_in_executor(
+            None, shutil.copy2, str(local_path), str(zip_in)
+        )
 
         zip_out = tmp / "output.zip"
         processed = 0
