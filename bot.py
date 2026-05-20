@@ -278,6 +278,7 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
         per_chat=True,
+        per_message=False,
     )
 
     app.add_handler(CommandHandler("start", start, filters=auth_filter))
