@@ -17,6 +17,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram import BotCommand
 from PIL import Image
 from dotenv import load_dotenv
 
@@ -57,16 +58,17 @@ def _build_auth_filter():
 auth_filter = _build_auth_filter()
 
 
-def fit_dimensions(orig_w: int, orig_h: int, target_w: int, target_h: int) -> tuple[int, int]:
-    """Fit image within target box, keeping aspect ratio."""
-    ratio = min(target_w / orig_w, target_h / orig_h)
-    return max(1, int(orig_w * ratio)), max(1, int(orig_h * ratio))
-
-
 def resize_image_bytes(data: bytes, suffix: str, target_w: int, target_h: int) -> bytes:
     img = Image.open(BytesIO(data))
-    new_w, new_h = fit_dimensions(img.width, img.height, target_w, target_h)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # Scale to cover the target (fill), then center-crop to exact dimensions
+    ratio = max(target_w / img.width, target_h / img.height)
+    scaled_w = max(int(img.width * ratio), target_w)
+    scaled_h = max(int(img.height * ratio), target_h)
+    img = img.resize((scaled_w, scaled_h), Image.LANCZOS)
+    left = (scaled_w - target_w) // 2
+    top = (scaled_h - target_h) // 2
+    img = img.crop((left, top, left + target_w, top + target_h))
 
     fmt = suffix.lstrip(".")
     if fmt in ("jpg", "jpeg"):
@@ -150,10 +152,10 @@ async def handle_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = [
         [
             InlineKeyboardButton("1920×1080", callback_data="1920x1080"),
-            InlineKeyboardButton("1280×720", callback_data="1280x720"),
+            InlineKeyboardButton("1080×1920", callback_data="1080x1920"),
         ],
         [
-            InlineKeyboardButton("1024×768", callback_data="1024x768"),
+            InlineKeyboardButton("1280×720", callback_data="1280x720"),
             InlineKeyboardButton("Custom...", callback_data="custom"),
         ],
     ]
@@ -303,6 +305,11 @@ async def _process_and_send(
                 caption=caption,
             )
 
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Send another .zip archive whenever you're ready.",
+        )
+
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Cancelled.")
@@ -341,6 +348,14 @@ def main() -> None:
     # Catch-all for anyone not in the allowlist
     if ALLOWED_USER_IDS:
         app.add_handler(MessageHandler(~auth_filter, unauthorized))
+
+    async def post_init(application: Application) -> None:
+        await application.bot.set_my_commands([
+            BotCommand("start", "Show welcome message"),
+            BotCommand("cancel", "Cancel current operation"),
+        ])
+
+    app.post_init = post_init
 
     logger.info("Bot started")
     app.run_polling(drop_pending_updates=True)
