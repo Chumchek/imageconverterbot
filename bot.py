@@ -45,6 +45,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
 processing_semaphore = asyncio.Semaphore(1)
 
 CHOOSING_RESOLUTION = 0
+COLLECTING_PHOTOS = 1
 
 
 def _build_auth_filter():
@@ -121,9 +122,12 @@ async def unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Hello! Send me a .zip archive with photos and I will resize all of them.\n\n"
-        "Maximum archive size: 40 MB.\n"
-        "Supported formats: JPG, PNG, WebP, BMP, TIFF."
+        "Hello! Send me photos or a .zip archive and I will resize them.\n\n"
+        "You can:\n"
+        "• Send photos directly (single or multiple in one message)\n"
+        "• Send a .zip archive (max 40 MB)\n\n"
+        "Supported formats: JPG, PNG, WebP, BMP, TIFF.\n"
+        "Output is always a .zip archive with resized images."
     )
 
 
@@ -140,7 +144,16 @@ async def handle_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     context.user_data["file_id"] = doc.file_id
     context.user_data["waiting_custom"] = False
+    context.user_data["input_mode"] = "zip"
 
+    await update.message.reply_text(
+        "Archive received! Choose the output resolution:",
+        reply_markup=_resolution_keyboard(),
+    )
+    return CHOOSING_RESOLUTION
+
+
+def _resolution_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("1920×1080", callback_data="1920x1080"),
@@ -151,11 +164,65 @@ async def handle_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             InlineKeyboardButton("Custom...", callback_data="custom"),
         ],
     ]
-    await update.message.reply_text(
-        "Archive received! Choose the output resolution:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    photo = update.message.photo[-1]
+    file_id = photo.file_id
+    media_group_id = update.message.media_group_id
+
+    context.user_data["input_mode"] = "photos"
+    context.user_data["waiting_custom"] = False
+
+    caption = update.message.caption
+    if caption:
+        context.user_data["photo_label"] = caption.strip()
+
+    if not media_group_id:
+        context.user_data["photo_file_ids"] = [file_id]
+        await update.message.reply_text(
+            "Photo received! Choose the output resolution:",
+            reply_markup=_resolution_keyboard(),
+        )
+        return CHOOSING_RESOLUTION
+
+    if "photo_file_ids" not in context.user_data or not context.user_data.get("_current_media_group"):
+        context.user_data["photo_file_ids"] = []
+        context.user_data["_current_media_group"] = media_group_id
+
+    context.user_data["photo_file_ids"].append(file_id)
+
+    if len(context.user_data["photo_file_ids"]) == 1:
+        context.job_queue.run_once(
+            _show_resolution_after_group,
+            when=2,
+            chat_id=update.message.chat_id,
+            data={"user_id": update.effective_user.id, "chat_id": update.message.chat_id},
+        )
+
+    return COLLECTING_PHOTOS
+
+
+async def handle_photo_in_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message.photo:
+        return COLLECTING_PHOTOS
+
+    photo = update.message.photo[-1]
+    context.user_data.setdefault("photo_file_ids", []).append(photo.file_id)
+    return COLLECTING_PHOTOS
+
+
+async def _show_resolution_after_group(context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = context.job.chat_id
+    user_id = context.job.data["user_id"]
+    user_data = context.application.user_data.get(user_id, {})
+    count = len(user_data.get("photo_file_ids", []))
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"{count} photo(s) received! Choose the output resolution:",
+        reply_markup=_resolution_keyboard(),
     )
-    return CHOOSING_RESOLUTION
 
 
 async def handle_resolution_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -200,12 +267,17 @@ async def _run_processing(
     target_h: int,
 ) -> None:
     async with processing_semaphore:
-        file_id = context.user_data["file_id"]
         try:
-            await _process_and_send(context, chat_id, file_id, target_w, target_h)
+            if context.user_data.get("input_mode") == "photos":
+                photo_file_ids = context.user_data.get("photo_file_ids", [])
+                photo_label = context.user_data.get("photo_label")
+                await _process_photos_and_send(context, chat_id, photo_file_ids, target_w, target_h, photo_label)
+            else:
+                file_id = context.user_data["file_id"]
+                await _process_and_send(context, chat_id, file_id, target_w, target_h)
         except Exception:
             logger.exception("Processing failed for chat %s", chat_id)
-            await context.bot.send_message(chat_id, "Something went wrong while processing the archive. Please try again.")
+            await context.bot.send_message(chat_id, "Something went wrong while processing. Please try again.")
 
 
 async def _process_and_send(
@@ -299,7 +371,88 @@ async def _process_and_send(
 
         await context.bot.send_message(
             chat_id=chat_id,
-            text="Send another .zip archive whenever you're ready.",
+            text="Send another .zip archive or photos whenever you're ready.",
+        )
+
+
+async def _process_photos_and_send(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    photo_file_ids: list[str],
+    target_w: int,
+    target_h: int,
+    label: str | None = None,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        zip_out = tmp / "output.zip"
+        processed = 0
+        skipped = 0
+
+        with zipfile.ZipFile(zip_out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for i, file_id in enumerate(photo_file_ids, 1):
+                tg_file = await context.bot.get_file(file_id)
+                fp = tg_file.file_path
+
+                idx = fp.find("/var/lib/telegram-bot-api")
+                if idx >= 0:
+                    container_path = Path(fp[idx:])
+                else:
+                    parts = fp.split(f"/{BOT_TOKEN}/")
+                    rel = parts[-1] if len(parts) > 1 else fp.lstrip("/")
+                    container_path = Path(f"/var/lib/telegram-bot-api/{BOT_TOKEN}/{rel}")
+
+                logger.info("Waiting for container file: %s", container_path)
+                for _ in range(300):
+                    if await _container_file_ready(container_path):
+                        break
+                    await asyncio.sleep(1)
+                else:
+                    logger.error("Timeout waiting for photo %d: %s", i, container_path)
+                    skipped += 1
+                    continue
+
+                local_path = tmp / f"photo_{i}"
+                await _copy_from_container(container_path, local_path)
+
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "exec", CONTAINER_NAME, "rm", "-f", str(container_path),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+
+                data = local_path.read_bytes()
+                suffix = Path(container_path).suffix.lower() or ".jpg"
+
+                try:
+                    resized = await asyncio.get_event_loop().run_in_executor(
+                        None, resize_image_bytes, data, suffix, target_w, target_h,
+                    )
+                    zout.writestr(f"photo_{i}{suffix}", resized)
+                    processed += 1
+                except Exception:
+                    logger.exception("Could not resize photo %d", i)
+                    zout.writestr(f"photo_{i}{suffix}", data)
+                    skipped += 1
+
+        caption = f"Done! {processed} photo(s) resized to {target_w}×{target_h}."
+        if skipped:
+            caption += f"\n{skipped} photo(s) could not be resized and are included unchanged."
+
+        zip_filename = f"{label}.zip" if label else f"resized_{target_w}x{target_h}.zip"
+
+        with open(zip_out, "rb") as f:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                filename=zip_filename,
+                caption=caption,
+            )
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Send another .zip archive or photos whenever you're ready.",
         )
 
 
@@ -320,12 +473,18 @@ def main() -> None:
 
     conv = ConversationHandler(
         entry_points=[
-            MessageHandler(auth_filter & filters.Document.FileExtension("zip"), handle_zip)
+            MessageHandler(auth_filter & filters.Document.FileExtension("zip"), handle_zip),
+            MessageHandler(auth_filter & filters.PHOTO, handle_photo),
         ],
         states={
             CHOOSING_RESOLUTION: [
                 CallbackQueryHandler(handle_resolution_button),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_text),
+                MessageHandler(auth_filter & filters.TEXT & ~filters.COMMAND, handle_custom_text),
+            ],
+            COLLECTING_PHOTOS: [
+                MessageHandler(auth_filter & filters.PHOTO, handle_photo_in_group),
+                CallbackQueryHandler(handle_resolution_button),
+                MessageHandler(auth_filter & filters.TEXT & ~filters.COMMAND, handle_custom_text),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
