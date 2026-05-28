@@ -491,6 +491,8 @@ def main() -> None:
         per_user=True,
         per_chat=True,
         per_message=False,
+        allow_reentry=True,
+        conversation_timeout=300,
     )
 
     app.add_handler(CommandHandler("start", start, filters=auth_filter))
