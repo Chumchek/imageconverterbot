@@ -480,6 +480,9 @@ def main() -> None:
             CHOOSING_RESOLUTION: [
                 CallbackQueryHandler(handle_resolution_button),
                 MessageHandler(auth_filter & filters.TEXT & ~filters.COMMAND, handle_custom_text),
+                # Allow restarting by sending new photos or a zip while waiting for resolution
+                MessageHandler(auth_filter & filters.PHOTO, handle_photo),
+                MessageHandler(auth_filter & filters.Document.FileExtension("zip"), handle_zip),
             ],
             COLLECTING_PHOTOS: [
                 MessageHandler(auth_filter & filters.PHOTO, handle_photo_in_group),
@@ -491,7 +494,6 @@ def main() -> None:
         per_user=True,
         per_chat=True,
         per_message=False,
-        allow_reentry=True,
         conversation_timeout=300,
     )
 
