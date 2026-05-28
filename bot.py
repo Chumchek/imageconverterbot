@@ -172,8 +172,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     file_id = photo.file_id
     media_group_id = update.message.media_group_id
 
+    # Always start fresh — clear any state left from a previous or stale session
     context.user_data["input_mode"] = "photos"
     context.user_data["waiting_custom"] = False
+    context.user_data.pop("photo_file_ids", None)
+    context.user_data.pop("photo_label", None)
+    context.user_data.pop("_current_media_group", None)
 
     caption = update.message.caption
     if caption:
@@ -187,19 +191,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         )
         return CHOOSING_RESOLUTION
 
-    if "photo_file_ids" not in context.user_data or not context.user_data.get("_current_media_group"):
-        context.user_data["photo_file_ids"] = []
-        context.user_data["_current_media_group"] = media_group_id
+    context.user_data["photo_file_ids"] = [file_id]
+    context.user_data["_current_media_group"] = media_group_id
 
-    context.user_data["photo_file_ids"].append(file_id)
-
-    if len(context.user_data["photo_file_ids"]) == 1:
-        context.job_queue.run_once(
-            _show_resolution_after_group,
-            when=2,
-            chat_id=update.message.chat_id,
-            data={"user_id": update.effective_user.id, "chat_id": update.message.chat_id},
-        )
+    context.job_queue.run_once(
+        _show_resolution_after_group,
+        when=2,
+        chat_id=update.message.chat_id,
+        data={"user_id": update.effective_user.id, "chat_id": update.message.chat_id},
+    )
 
     return COLLECTING_PHOTOS
 
